@@ -18,11 +18,8 @@ from typing import Any, Protocol, TypedDict
 
 from pydantic import BaseModel, Field
 
-from graphiti_core.utils.text_utils import MAX_SUMMARY_CHARS
-
 from .models import Message, PromptFunction, PromptVersion
 from .prompt_helpers import to_prompt_json
-from .snippets import summary_instructions
 
 
 class ExtractedEntity(BaseModel):
@@ -45,8 +42,7 @@ class EntityClassificationTriple(BaseModel):
     uuid: str = Field(description='UUID of the entity')
     name: str = Field(description='Name of the entity')
     entity_type: str | None = Field(
-        default=None,
-        description='Type of the entity. Must be one of the provided types or None',
+        default=None, description='Type of the entity. Must be one of the provided types or None'
     )
 
 
@@ -59,7 +55,7 @@ class EntityClassification(BaseModel):
 class EntitySummary(BaseModel):
     summary: str = Field(
         ...,
-        description=f'Summary containing the important information about the entity. Under {MAX_SUMMARY_CHARS} characters.',
+        description='Summary containing the important information about the entity. Under 250 words',
     )
 
 
@@ -93,7 +89,7 @@ def extract_message(context: dict[str, Any]) -> list[Message]:
 </ENTITY TYPES>
 
 <PREVIOUS MESSAGES>
-{to_prompt_json([ep for ep in context['previous_episodes']])}
+{to_prompt_json([ep for ep in context['previous_episodes']], ensure_ascii=context.get('ensure_ascii', True), indent=2)}
 </PREVIOUS MESSAGES>
 
 <CURRENT MESSAGE>
@@ -155,9 +151,8 @@ For each entity extracted, also determine its entity type based on the provided 
 Indicate the classified entity type by providing its entity_type_id.
 
 Guidelines:
-1. Extract all entities that the JSON represents. This will often be something like a "name" or "user" field
-2. Extract all entities mentioned in all other properties throughout the JSON structure
-3. Do NOT extract any properties that contain dates
+1. Always try to extract an entities that the JSON represents. This will often be something like a "name" or "user field
+2. Do NOT extract any properties that contain dates
 """
     return [
         Message(role='system', content=sys_prompt),
@@ -220,7 +215,7 @@ def reflexion(context: dict[str, Any]) -> list[Message]:
 
     user_prompt = f"""
 <PREVIOUS MESSAGES>
-{to_prompt_json([ep for ep in context['previous_episodes']])}
+{to_prompt_json([ep for ep in context['previous_episodes']], ensure_ascii=context.get('ensure_ascii', True), indent=2)}
 </PREVIOUS MESSAGES>
 <CURRENT MESSAGE>
 {context['episode_content']}
@@ -244,22 +239,22 @@ def classify_nodes(context: dict[str, Any]) -> list[Message]:
 
     user_prompt = f"""
     <PREVIOUS MESSAGES>
-    {to_prompt_json([ep for ep in context['previous_episodes']])}
+    {to_prompt_json([ep for ep in context['previous_episodes']], ensure_ascii=context.get('ensure_ascii', True), indent=2)}
     </PREVIOUS MESSAGES>
     <CURRENT MESSAGE>
     {context['episode_content']}
     </CURRENT MESSAGE>
-
+    
     <EXTRACTED ENTITIES>
     {context['extracted_entities']}
     </EXTRACTED ENTITIES>
-
+    
     <ENTITY TYPES>
     {context['entity_types']}
     </ENTITY TYPES>
-
+    
     Given the above conversation, extracted entities, and provided entity types and their descriptions, classify the extracted entities.
-
+    
     Guidelines:
     1. Each entity must have exactly one type
     2. Only use the provided ENTITY TYPES as types, do not use additional types to classify entities.
@@ -280,18 +275,19 @@ def extract_attributes(context: dict[str, Any]) -> list[Message]:
         Message(
             role='user',
             content=f"""
-        Given the MESSAGES and the following ENTITY, update any of its attributes based on the information provided
+
+        <MESSAGES>
+        {to_prompt_json(context['previous_episodes'], ensure_ascii=context.get('ensure_ascii', True), indent=2)}
+        {to_prompt_json(context['episode_content'], ensure_ascii=context.get('ensure_ascii', True), indent=2)}
+        </MESSAGES>
+
+        Given the above MESSAGES and the following ENTITY, update any of its attributes based on the information provided
         in MESSAGES. Use the provided attribute descriptions to better understand how each attribute should be determined.
 
         Guidelines:
         1. Do not hallucinate entity property values if they cannot be found in the current context.
         2. Only use the provided MESSAGES and ENTITY to set attribute values.
-
-        <MESSAGES>
-        {to_prompt_json(context['previous_episodes'])}
-        {to_prompt_json(context['episode_content'])}
-        </MESSAGES>
-
+        
         <ENTITY>
         {context['node']}
         </ENTITY>
@@ -309,15 +305,20 @@ def extract_summary(context: dict[str, Any]) -> list[Message]:
         Message(
             role='user',
             content=f"""
-        Given the MESSAGES and the ENTITY, update the summary that combines relevant information about the entity
-        from the messages and relevant information from the existing summary.
-
-        {summary_instructions}
 
         <MESSAGES>
-        {to_prompt_json(context['previous_episodes'])}
-        {to_prompt_json(context['episode_content'])}
+        {to_prompt_json(context['previous_episodes'], ensure_ascii=context.get('ensure_ascii', True), indent=2)}
+        {to_prompt_json(context['episode_content'], ensure_ascii=context.get('ensure_ascii', True), indent=2)}
         </MESSAGES>
+
+        Given the above MESSAGES and the following ENTITY, update the summary that combines relevant information about the entity
+        from the messages and relevant information from the existing summary.
+        
+        Guidelines:
+        1. Do not hallucinate entity summary information if they cannot be found in the current context.
+        2. Only use the provided MESSAGES and ENTITY to set attribute values.
+        3. The summary attribute represents a summary of the ENTITY, and should be updated with new information about the Entity from the MESSAGES. 
+            Summaries must be no longer than 250 words.
 
         <ENTITY>
         {context['node']}

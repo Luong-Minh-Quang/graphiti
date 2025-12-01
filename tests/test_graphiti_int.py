@@ -23,7 +23,7 @@ from graphiti_core.graphiti import Graphiti
 from graphiti_core.search.search_filters import ComparisonOperator, DateFilter, SearchFilters
 from graphiti_core.search.search_helpers import search_results_to_context_string
 from graphiti_core.utils.datetime_utils import utc_now
-from tests.helpers_test import GraphProvider
+from tests.helpers_test import drivers, get_driver
 
 pytestmark = pytest.mark.integration
 pytest_plugins = ('pytest_asyncio',)
@@ -51,12 +51,15 @@ def setup_logging():
 
 
 @pytest.mark.asyncio
-async def test_graphiti_init(graph_driver):
-    if graph_driver.provider == GraphProvider.FALKORDB:
-        pytest.skip('Skipping as tests fail on Falkordb')
-
+@pytest.mark.parametrize(
+    'driver',
+    drivers,
+    ids=drivers,
+)
+async def test_graphiti_init(driver):
     logger = setup_logging()
-    graphiti = Graphiti(graph_driver=graph_driver)
+    driver = get_driver(driver)
+    graphiti = Graphiti(graph_driver=driver)
 
     await graphiti.build_indices_and_constraints()
 

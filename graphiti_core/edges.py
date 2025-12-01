@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import json
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -31,10 +30,11 @@ from graphiti_core.errors import EdgeNotFoundError, GroupsEdgesNotFoundError
 from graphiti_core.helpers import parse_db_date
 from graphiti_core.models.edges.edge_db_queries import (
     COMMUNITY_EDGE_RETURN,
+    ENTITY_EDGE_RETURN,
+    ENTITY_EDGE_RETURN_NEPTUNE,
     EPISODIC_EDGE_RETURN,
     EPISODIC_EDGE_SAVE,
     get_community_edge_save_query,
-    get_entity_edge_return_query,
     get_entity_edge_save_query,
 )
 from graphiti_core.nodes import Node
@@ -53,68 +53,32 @@ class Edge(BaseModel, ABC):
     async def save(self, driver: GraphDriver): ...
 
     async def delete(self, driver: GraphDriver):
-        if driver.graph_operations_interface:
-            return await driver.graph_operations_interface.edge_delete(self, driver)
-
-        if driver.provider == GraphProvider.KUZU:
-            await driver.execute_query(
-                """
-                MATCH (n)-[e:MENTIONS|HAS_MEMBER {uuid: $uuid}]->(m)
-                DELETE e
-                """,
-                uuid=self.uuid,
-            )
-            await driver.execute_query(
-                """
-                MATCH (e:RelatesToNode_ {uuid: $uuid})
-                DETACH DELETE e
-                """,
-                uuid=self.uuid,
-            )
-        else:
-            await driver.execute_query(
-                """
-                MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER {uuid: $uuid}]->(m)
-                DELETE e
-                """,
-                uuid=self.uuid,
-            )
+        result = await driver.execute_query(
+            """
+            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER {uuid: $uuid}]->(m)
+            DELETE e
+            """,
+            uuid=self.uuid,
+        )
 
         logger.debug(f'Deleted Edge: {self.uuid}')
 
+        return result
+
     @classmethod
     async def delete_by_uuids(cls, driver: GraphDriver, uuids: list[str]):
-        if driver.graph_operations_interface:
-            return await driver.graph_operations_interface.edge_delete_by_uuids(cls, driver, uuids)
-
-        if driver.provider == GraphProvider.KUZU:
-            await driver.execute_query(
-                """
-                MATCH (n)-[e:MENTIONS|HAS_MEMBER]->(m)
-                WHERE e.uuid IN $uuids
-                DELETE e
-                """,
-                uuids=uuids,
-            )
-            await driver.execute_query(
-                """
-                MATCH (e:RelatesToNode_)
-                WHERE e.uuid IN $uuids
-                DETACH DELETE e
-                """,
-                uuids=uuids,
-            )
-        else:
-            await driver.execute_query(
-                """
-                MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]->(m)
-                WHERE e.uuid IN $uuids
-                DELETE e
-                """,
-                uuids=uuids,
-            )
+        result = await driver.execute_query(
+            """
+            MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]->(m)
+            WHERE e.uuid IN $uuids
+            DELETE e
+            """,
+            uuids=uuids,
+        )
 
         logger.debug(f'Deleted Edges: {uuids}')
+
+        return result
 
     def __hash__(self):
         return hash(self.uuid)
@@ -202,7 +166,7 @@ class EpisodicEdge(Edge):
             """
             + EPISODIC_EDGE_RETURN
             + """
-            ORDER BY e.uuid DESC
+            ORDER BY e.uuid DESC 
             """
             + limit_query,
             group_ids=group_ids,
@@ -251,24 +215,15 @@ class EntityEdge(Edge):
         return self.fact_embedding
 
     async def load_fact_embedding(self, driver: GraphDriver):
-        if driver.graph_operations_interface:
-            return await driver.graph_operations_interface.edge_load_embeddings(self, driver)
-
-        query = """
-            MATCH (n:Entity)-[e:RELATES_TO {uuid: $uuid}]->(m:Entity)
-            RETURN e.fact_embedding AS fact_embedding
-        """
-
         if driver.provider == GraphProvider.NEPTUNE:
-            query = """
-                MATCH (n:Entity)-[e:RELATES_TO {uuid: $uuid}]->(m:Entity)
+            query: LiteralString = """
+            MATCH (n:Entity)-[e:RELATES_TO {uuid: $uuid}]->(m:Entity)
                 RETURN [x IN split(e.fact_embedding, ",") | toFloat(x)] as fact_embedding
             """
-
-        if driver.provider == GraphProvider.KUZU:
-            query = """
-                MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_ {uuid: $uuid})-[:RELATES_TO]->(m:Entity)
-                RETURN e.fact_embedding AS fact_embedding
+        else:
+            query: LiteralString = """
+            MATCH (n:Entity)-[e:RELATES_TO {uuid: $uuid}]->(m:Entity)
+            RETURN e.fact_embedding AS fact_embedding
             """
 
         records, _, _ = await driver.execute_query(
@@ -298,18 +253,15 @@ class EntityEdge(Edge):
             'invalid_at': self.invalid_at,
         }
 
-        if driver.provider == GraphProvider.KUZU:
-            edge_data['attributes'] = json.dumps(self.attributes)
-            result = await driver.execute_query(
-                get_entity_edge_save_query(driver.provider),
-                **edge_data,
-            )
-        else:
-            edge_data.update(self.attributes or {})
-            result = await driver.execute_query(
-                get_entity_edge_save_query(driver.provider),
-                edge_data=edge_data,
-            )
+        edge_data.update(self.attributes or {})
+
+        if driver.provider == GraphProvider.NEPTUNE:
+            driver.save_to_aoss('edge_name_and_fact', [edge_data])  # pyright: ignore reportAttributeAccessIssue
+
+        result = await driver.execute_query(
+            get_entity_edge_save_query(driver.provider),
+            edge_data=edge_data,
+        )
 
         logger.debug(f'Saved edge to Graph: {self.uuid}')
 
@@ -317,84 +269,47 @@ class EntityEdge(Edge):
 
     @classmethod
     async def get_by_uuid(cls, driver: GraphDriver, uuid: str):
-        match_query = """
-            MATCH (n:Entity)-[e:RELATES_TO {uuid: $uuid}]->(m:Entity)
-        """
-        if driver.provider == GraphProvider.KUZU:
-            match_query = """
-                MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_ {uuid: $uuid})-[:RELATES_TO]->(m:Entity)
-            """
-
         records, _, _ = await driver.execute_query(
-            match_query
-            + """
+            """
+            MATCH (n:Entity)-[e:RELATES_TO {uuid: $uuid}]->(m:Entity)
             RETURN
             """
-            + get_entity_edge_return_query(driver.provider),
+            + (
+                ENTITY_EDGE_RETURN_NEPTUNE
+                if driver.provider == GraphProvider.NEPTUNE
+                else ENTITY_EDGE_RETURN
+            ),
             uuid=uuid,
             routing_='r',
         )
 
-        edges = [get_entity_edge_from_record(record, driver.provider) for record in records]
+        edges = [get_entity_edge_from_record(record) for record in records]
 
         if len(edges) == 0:
             raise EdgeNotFoundError(uuid)
         return edges[0]
 
     @classmethod
-    async def get_between_nodes(
-        cls, driver: GraphDriver, source_node_uuid: str, target_node_uuid: str
-    ):
-        match_query = """
-            MATCH (n:Entity {uuid: $source_node_uuid})-[e:RELATES_TO]->(m:Entity {uuid: $target_node_uuid})
-        """
-        if driver.provider == GraphProvider.KUZU:
-            match_query = """
-                MATCH (n:Entity {uuid: $source_node_uuid})
-                      -[:RELATES_TO]->(e:RelatesToNode_)
-                      -[:RELATES_TO]->(m:Entity {uuid: $target_node_uuid})
-            """
-
-        records, _, _ = await driver.execute_query(
-            match_query
-            + """
-            RETURN
-            """
-            + get_entity_edge_return_query(driver.provider),
-            source_node_uuid=source_node_uuid,
-            target_node_uuid=target_node_uuid,
-            routing_='r',
-        )
-
-        edges = [get_entity_edge_from_record(record, driver.provider) for record in records]
-
-        return edges
-
-    @classmethod
     async def get_by_uuids(cls, driver: GraphDriver, uuids: list[str]):
         if len(uuids) == 0:
             return []
 
-        match_query = """
-            MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
-        """
-        if driver.provider == GraphProvider.KUZU:
-            match_query = """
-                MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)
-            """
-
         records, _, _ = await driver.execute_query(
-            match_query
-            + """
+            """
+            MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
             WHERE e.uuid IN $uuids
             RETURN
             """
-            + get_entity_edge_return_query(driver.provider),
+            + (
+                ENTITY_EDGE_RETURN_NEPTUNE
+                if driver.provider == GraphProvider.NEPTUNE
+                else ENTITY_EDGE_RETURN
+            ),
             uuids=uuids,
             routing_='r',
         )
 
-        edges = [get_entity_edge_from_record(record, driver.provider) for record in records]
+        edges = [get_entity_edge_from_record(record) for record in records]
 
         return edges
 
@@ -417,27 +332,23 @@ class EntityEdge(Edge):
             else ''
         )
 
-        match_query = """
-            MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
-        """
-        if driver.provider == GraphProvider.KUZU:
-            match_query = """
-                MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)
-            """
-
         records, _, _ = await driver.execute_query(
-            match_query
-            + """
+            """
+            MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
             WHERE e.group_id IN $group_ids
             """
             + cursor_query
             + """
             RETURN
             """
-            + get_entity_edge_return_query(driver.provider)
+            + (
+                ENTITY_EDGE_RETURN_NEPTUNE
+                if driver.provider == GraphProvider.NEPTUNE
+                else ENTITY_EDGE_RETURN
+            )
             + with_embeddings_query
             + """
-            ORDER BY e.uuid DESC
+            ORDER BY e.uuid DESC 
             """
             + limit_query,
             group_ids=group_ids,
@@ -446,7 +357,7 @@ class EntityEdge(Edge):
             routing_='r',
         )
 
-        edges = [get_entity_edge_from_record(record, driver.provider) for record in records]
+        edges = [get_entity_edge_from_record(record) for record in records]
 
         if len(edges) == 0:
             raise GroupsEdgesNotFoundError(group_ids)
@@ -454,25 +365,21 @@ class EntityEdge(Edge):
 
     @classmethod
     async def get_by_node_uuid(cls, driver: GraphDriver, node_uuid: str):
-        match_query = """
-            MATCH (n:Entity {uuid: $node_uuid})-[e:RELATES_TO]-(m:Entity)
-        """
-        if driver.provider == GraphProvider.KUZU:
-            match_query = """
-                MATCH (n:Entity {uuid: $node_uuid})-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity)
-            """
-
         records, _, _ = await driver.execute_query(
-            match_query
-            + """
+            """
+            MATCH (n:Entity {uuid: $node_uuid})-[e:RELATES_TO]-(m:Entity)
             RETURN
             """
-            + get_entity_edge_return_query(driver.provider),
+            + (
+                ENTITY_EDGE_RETURN_NEPTUNE
+                if driver.provider == GraphProvider.NEPTUNE
+                else ENTITY_EDGE_RETURN
+            ),
             node_uuid=node_uuid,
             routing_='r',
         )
 
-        edges = [get_entity_edge_from_record(record, driver.provider) for record in records]
+        edges = [get_entity_edge_from_record(record) for record in records]
 
         return edges
 
@@ -572,25 +479,7 @@ def get_episodic_edge_from_record(record: Any) -> EpisodicEdge:
     )
 
 
-def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityEdge:
-    episodes = record['episodes']
-    if provider == GraphProvider.KUZU:
-        attributes = json.loads(record['attributes']) if record['attributes'] else {}
-    else:
-        attributes = record['attributes']
-        attributes.pop('uuid', None)
-        attributes.pop('source_node_uuid', None)
-        attributes.pop('target_node_uuid', None)
-        attributes.pop('fact', None)
-        attributes.pop('fact_embedding', None)
-        attributes.pop('name', None)
-        attributes.pop('group_id', None)
-        attributes.pop('episodes', None)
-        attributes.pop('created_at', None)
-        attributes.pop('expired_at', None)
-        attributes.pop('valid_at', None)
-        attributes.pop('invalid_at', None)
-
+def get_entity_edge_from_record(record: Any) -> EntityEdge:
     edge = EntityEdge(
         uuid=record['uuid'],
         source_node_uuid=record['source_node_uuid'],
@@ -599,13 +488,25 @@ def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityE
         fact_embedding=record.get('fact_embedding'),
         name=record['name'],
         group_id=record['group_id'],
-        episodes=episodes,
+        episodes=record['episodes'],
         created_at=parse_db_date(record['created_at']),  # type: ignore
         expired_at=parse_db_date(record['expired_at']),
         valid_at=parse_db_date(record['valid_at']),
         invalid_at=parse_db_date(record['invalid_at']),
-        attributes=attributes,
+        attributes=record['attributes'],
     )
+
+    edge.attributes.pop('uuid', None)
+    edge.attributes.pop('source_node_uuid', None)
+    edge.attributes.pop('target_node_uuid', None)
+    edge.attributes.pop('fact', None)
+    edge.attributes.pop('name', None)
+    edge.attributes.pop('group_id', None)
+    edge.attributes.pop('episodes', None)
+    edge.attributes.pop('created_at', None)
+    edge.attributes.pop('expired_at', None)
+    edge.attributes.pop('valid_at', None)
+    edge.attributes.pop('invalid_at', None)
 
     return edge
 
@@ -621,11 +522,8 @@ def get_community_edge_from_record(record: Any):
 
 
 async def create_entity_edge_embeddings(embedder: EmbedderClient, edges: list[EntityEdge]):
-    # filter out falsey values from edges
-    filtered_edges = [edge for edge in edges if edge.fact]
-
-    if len(filtered_edges) == 0:
+    if len(edges) == 0:
         return
-    fact_embeddings = await embedder.create_batch([edge.fact for edge in filtered_edges])
-    for edge, fact_embedding in zip(filtered_edges, fact_embeddings, strict=True):
+    fact_embeddings = await embedder.create_batch([edge.fact for edge in edges])
+    for edge, fact_embedding in zip(edges, fact_embeddings, strict=True):
         edge.fact_embedding = fact_embedding

@@ -60,6 +60,7 @@ class Location(BaseModel):
 @pytest.mark.parametrize(
     'driver',
     drivers,
+    ids=drivers,
 )
 async def test_exclude_default_entity_type(driver):
     """Test excluding the default 'Entity' type while keeping custom types."""
@@ -117,6 +118,7 @@ async def test_exclude_default_entity_type(driver):
 @pytest.mark.parametrize(
     'driver',
     drivers,
+    ids=drivers,
 )
 async def test_exclude_specific_custom_types(driver):
     """Test excluding specific custom entity types while keeping others."""
@@ -180,6 +182,7 @@ async def test_exclude_specific_custom_types(driver):
 @pytest.mark.parametrize(
     'driver',
     drivers,
+    ids=drivers,
 )
 async def test_exclude_all_types(driver):
     """Test excluding all entity types (edge case)."""
@@ -228,6 +231,7 @@ async def test_exclude_all_types(driver):
 @pytest.mark.parametrize(
     'driver',
     drivers,
+    ids=drivers,
 )
 async def test_exclude_no_types(driver):
     """Test normal behavior when no types are excluded (baseline test)."""
@@ -310,6 +314,7 @@ def test_validation_invalid_excluded_types():
 @pytest.mark.parametrize(
     'driver',
     drivers,
+    ids=drivers,
 )
 async def test_excluded_types_parameter_validation_in_add_episode(driver):
     """Test that add_episode validates excluded_entity_types parameter."""

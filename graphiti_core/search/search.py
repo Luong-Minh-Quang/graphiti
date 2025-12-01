@@ -21,7 +21,6 @@ from time import time
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 from graphiti_core.driver.driver import GraphDriver
 from graphiti_core.edges import EntityEdge
-from graphiti_core.embedder.client import EMBEDDING_DIM
 from graphiti_core.errors import SearchRerankerError
 from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.helpers import semaphore_gather
@@ -30,7 +29,6 @@ from graphiti_core.search.search_config import (
     DEFAULT_SEARCH_LIMIT,
     CommunityReranker,
     CommunitySearchConfig,
-    CommunitySearchMethod,
     EdgeReranker,
     EdgeSearchConfig,
     EdgeSearchMethod,
@@ -74,39 +72,20 @@ async def search(
     center_node_uuid: str | None = None,
     bfs_origin_node_uuids: list[str] | None = None,
     query_vector: list[float] | None = None,
-    driver: GraphDriver | None = None,
 ) -> SearchResults:
     start = time()
 
-    driver = driver or clients.driver
+    driver = clients.driver
     embedder = clients.embedder
     cross_encoder = clients.cross_encoder
 
     if query.strip() == '':
         return SearchResults()
-
-    if (
-        config.edge_config
-        and EdgeSearchMethod.cosine_similarity in config.edge_config.search_methods
-        or config.edge_config
-        and EdgeReranker.mmr == config.edge_config.reranker
-        or config.node_config
-        and NodeSearchMethod.cosine_similarity in config.node_config.search_methods
-        or config.node_config
-        and NodeReranker.mmr == config.node_config.reranker
-        or (
-            config.community_config
-            and CommunitySearchMethod.cosine_similarity in config.community_config.search_methods
-        )
-        or (config.community_config and CommunityReranker.mmr == config.community_config.reranker)
-    ):
-        search_vector = (
-            query_vector
-            if query_vector is not None
-            else await embedder.create(input_data=[query.replace('\n', ' ')])
-        )
-    else:
-        search_vector = [0.0] * EMBEDDING_DIM
+    query_vector = (
+        query_vector
+        if query_vector is not None
+        else await embedder.create(input_data=[query.replace('\n', ' ')])
+    )
 
     # if group_ids is empty, set it to None
     group_ids = group_ids if group_ids and group_ids != [''] else None
@@ -120,7 +99,7 @@ async def search(
             driver,
             cross_encoder,
             query,
-            search_vector,
+            query_vector,
             group_ids,
             config.edge_config,
             search_filter,
@@ -133,7 +112,7 @@ async def search(
             driver,
             cross_encoder,
             query,
-            search_vector,
+            query_vector,
             group_ids,
             config.node_config,
             search_filter,
@@ -146,7 +125,7 @@ async def search(
             driver,
             cross_encoder,
             query,
-            search_vector,
+            query_vector,
             group_ids,
             config.episode_config,
             search_filter,
@@ -157,7 +136,7 @@ async def search(
             driver,
             cross_encoder,
             query,
-            search_vector,
+            query_vector,
             group_ids,
             config.community_config,
             config.limit,
@@ -331,12 +310,7 @@ async def node_search(
     if NodeSearchMethod.cosine_similarity in config.search_methods:
         search_tasks.append(
             node_similarity_search(
-                driver,
-                query_vector,
-                search_filter,
-                group_ids,
-                2 * limit,
-                config.sim_min_score,
+                driver, query_vector, search_filter, group_ids, 2 * limit, config.sim_min_score
             )
         )
     if NodeSearchMethod.bfs in config.search_methods:

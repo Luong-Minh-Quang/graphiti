@@ -20,6 +20,8 @@ from datetime import datetime
 from typing_extensions import LiteralString
 
 from graphiti_core.driver.driver import GraphDriver, GraphProvider
+from graphiti_core.graph_queries import get_fulltext_indices, get_range_indices
+from graphiti_core.helpers import semaphore_gather
 from graphiti_core.models.nodes.node_db_queries import (
     EPISODIC_NODE_RETURN,
     EPISODIC_NODE_RETURN_NEPTUNE,
@@ -31,6 +33,41 @@ EPISODE_WINDOW_LEN = 3
 logger = logging.getLogger(__name__)
 
 
+async def build_indices_and_constraints(driver: GraphDriver, delete_existing: bool = False):
+    if driver.provider == GraphProvider.NEPTUNE:
+        return  # Neptune does not need indexes built
+    if delete_existing:
+        records, _, _ = await driver.execute_query(
+            """
+            SHOW INDEXES YIELD name
+            """,
+        )
+        index_names = [record['name'] for record in records]
+        await semaphore_gather(
+            *[
+                driver.execute_query(
+                    """DROP INDEX $name""",
+                    name=name,
+                )
+                for name in index_names
+            ]
+        )
+    range_indices: list[LiteralString] = get_range_indices(driver.provider)
+
+    fulltext_indices: list[LiteralString] = get_fulltext_indices(driver.provider)
+
+    index_queries: list[LiteralString] = range_indices + fulltext_indices
+
+    await semaphore_gather(
+        *[
+            driver.execute_query(
+                query,
+            )
+            for query in index_queries
+        ]
+    )
+
+
 async def clear_data(driver: GraphDriver, group_ids: list[str] | None = None):
     async with driver.session() as session:
 
@@ -38,19 +75,10 @@ async def clear_data(driver: GraphDriver, group_ids: list[str] | None = None):
             await tx.run('MATCH (n) DETACH DELETE n')
 
         async def delete_group_ids(tx):
-            labels = ['Entity', 'Episodic', 'Community']
-            if driver.provider == GraphProvider.KUZU:
-                labels.append('RelatesToNode_')
-
-            for label in labels:
-                await tx.run(
-                    f"""
-                    MATCH (n:{label})
-                    WHERE n.group_id IN $group_ids
-                    DETACH DELETE n
-                    """,
-                    group_ids=group_ids,
-                )
+            await tx.run(
+                'MATCH (n) WHERE (n:Entity OR n:Episodic OR n:Community) AND n.group_id IN $group_ids DETACH DELETE n',
+                group_ids=group_ids,
+            )
 
         if group_ids is None:
             await session.execute_write(delete_all)
@@ -79,23 +107,18 @@ async def retrieve_episodes(
     Returns:
         list[EpisodicNode]: A list of EpisodicNode objects representing the retrieved episodes.
     """
-
-    query_params: dict = {}
-    query_filter = ''
-    if group_ids and len(group_ids) > 0:
-        query_filter += '\nAND e.group_id IN $group_ids'
-        query_params['group_ids'] = group_ids
-
-    if source is not None:
-        query_filter += '\nAND e.source = $source'
-        query_params['source'] = source.name
+    group_id_filter: LiteralString = (
+        '\nAND e.group_id IN $group_ids' if group_ids and len(group_ids) > 0 else ''
+    )
+    source_filter: LiteralString = '\nAND e.source = $source' if source is not None else ''
 
     query: LiteralString = (
         """
-                                    MATCH (e:Episodic)
-                                    WHERE e.valid_at <= $reference_time
-                                    """
-        + query_filter
+        MATCH (e:Episodic)
+        WHERE e.valid_at <= $reference_time
+        """
+        + group_id_filter
+        + source_filter
         + """
         RETURN
         """
@@ -112,8 +135,9 @@ async def retrieve_episodes(
     result, _, _ = await driver.execute_query(
         query,
         reference_time=reference_time,
+        source=source.name if source is not None else None,
         num_episodes=last_n,
-        **query_params,
+        group_ids=group_ids,
     )
 
     episodes = [get_episodic_node_from_record(record) for record in result]
