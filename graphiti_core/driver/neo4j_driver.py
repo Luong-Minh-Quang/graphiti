@@ -55,6 +55,7 @@ class Neo4jDriver(GraphDriver):
 
     def session(self, database: str | None = None) -> GraphDriverSession:
         _database = database or self._database
+        logging.warning(f'Using Neo4j database: {_database}')
         return self.client.session(database=_database)  # type: ignore
 
     async def close(self) -> None:

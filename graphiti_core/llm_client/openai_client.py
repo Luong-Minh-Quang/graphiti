@@ -19,7 +19,7 @@ import typing
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
-
+from langsmith import traceable
 from .config import DEFAULT_MAX_TOKENS, LLMConfig
 from .openai_base_client import DEFAULT_REASONING, DEFAULT_VERBOSITY, BaseOpenAIClient
 
@@ -61,7 +61,7 @@ class OpenAIClient(BaseOpenAIClient):
             self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)
         else:
             self.client = client
-
+    @traceable
     async def _create_structured_completion(
         self,
         model: str,
@@ -84,7 +84,7 @@ class OpenAIClient(BaseOpenAIClient):
         )
 
         return response
-
+    @traceable
     async def _create_completion(
         self,
         model: str,

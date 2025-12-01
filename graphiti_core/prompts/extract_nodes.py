@@ -180,11 +180,30 @@ Indicate the classified entity type by providing its entity_type_id.
 {context['custom_prompt']}
 
 Guidelines:
-1. Extract significant entities, concepts, or actors mentioned in the conversation.
-2. Avoid creating nodes for relationships or actions.
+
+1. Extract all entities, concepts, or actors mentioned in the conversation.
+2. Avoid creating nodes for relationships.
 3. Avoid creating nodes for temporal information like dates, times or years (these will be added to edges later).
-4. Be as explicit as possible in your node names, using full names and avoiding abbreviations.
+4. Be as explicit as possible in your node names, using full names and avoiding abbreviations. If you see entities that are context dependent (e.g. "Quy chế này", "Quy định này"), use the information in the message to make the name more explicit (e.g. "Quy chế Đầu tư mua sắm, thuê và quản lý tài sản"). 
+5. Speaker Extraction: Always extract the speaker (the part before the colon `:` in each dialogue line) as the first entity node.
+   - If the speaker is mentioned again in the message, treat both mentions as a **single entity**.
 """
+# 6. Document Extraction:
+#    - If the CURRENT MESSAGE contains a reference to a document or part of a document (Section 1, Chapter 2, etc.), extract that as an entity node. If it is 
+#    - If a lower-level reference (e.g., “Điều 3”) appears inside a known higher-level document context (e.g., “52/QĐ-BIDV”, “Chương I: QUY ĐỊNH CHUNG”), include all known parent levels in the extracted name. You may shorten the name of the parent levels if it is too long.
+
+#    - Example: 
+#     Quyết định về Phân cấp, ủy quyền trong hoạt động đầu tư mua sắm, thuê tài sản, dịch vụ thuộc lĩnh vực Công nghệ thông tin (52/QĐ-BIDV): 
+#     Chương I QUY ĐỊNH CHUNG
+#     Điều 1. Phạm vi điều chỉnh và đối tượng áp dụng
+#     1. Phạm vi điều chỉnh:
+#     a) Quy chế này quy định các nội dung....
+#     Điều 2. Giải thích từ ngữ...
+#     In this example, "52/QĐ-BIDV, Chương I QUY ĐỊNH CHUNG", "52/QĐ-BIDV, Chương I, Điều 1. Phạm vi điều chỉnh và đối tượng áp dụng", "52/QĐ-BIDV, Chương I, Điều 1. 1. Phạm vi điều chỉnh", and "52/QĐ-BIDV, Chương I, Điều 2. Giải thích từ ngữ" should each be extracted as separate entity nodes.
+#     All parts of the document are extracted as nodes, and the lower level sections all have the shortened parent levels in their names.
+#     ("Quy định về Phân cấp, ủy quyền trong hoạt động đầu tư mua sắm, thuê tài sản, dịch vụ thuộc lĩnh vực Công nghệ thông tin (52/QĐ-BIDV)" should also be extracted as an entity, since it is considered the speaker)
+
+# """
     return [
         Message(role='system', content=sys_prompt),
         Message(role='user', content=user_prompt),

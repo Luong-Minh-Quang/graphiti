@@ -56,7 +56,7 @@ def summarize_pair(context: dict[str, Any]) -> list[Message]:
             content=f"""
         Synthesize the information from the following two summaries into a single succinct summary.
         
-        Summaries must be under 250 words.
+        Summaries must be under 250 words, and must be in the SAME LANGUAGE of the original summaries.
 
         Summaries:
         {to_prompt_json(context['node_summaries'], ensure_ascii=context.get('ensure_ascii', True), indent=2)}
@@ -82,7 +82,7 @@ def summarize_context(context: dict[str, Any]) -> list[Message]:
         
         Given the above MESSAGES and the following ENTITY name, create a summary for the ENTITY. Your summary must only use
         information from the provided MESSAGES. Your summary should also only contain information relevant to the
-        provided ENTITY. Summaries must be under 250 words.
+        provided ENTITY. Summaries must be under 250 words, and must be in the SAME LANGUAGE of the messages.
         
         In addition, extract any values for the provided entity properties based on their descriptions.
         If the value of the entity property cannot be found in the current context, set the value of the property to the Python value None.
@@ -117,7 +117,7 @@ def summary_description(context: dict[str, Any]) -> list[Message]:
             role='user',
             content=f"""
         Create a short one sentence description of the summary that explains what kind of information is summarized.
-        Summaries must be under 250 words.
+        Summaries must be under 250 words, and must be in the same language as the information received.
 
         Summary:
         {to_prompt_json(context['summary'], ensure_ascii=context.get('ensure_ascii', True), indent=2)}

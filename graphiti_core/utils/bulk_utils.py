@@ -49,6 +49,14 @@ from graphiti_core.utils.maintenance.node_operations import (
     resolve_extracted_nodes,
 )
 
+from pathlib import Path
+import json
+from typing import Type, TypeVar, List
+from pydantic import BaseModel
+
+T = TypeVar("T", bound=BaseModel)
+
+
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 10
@@ -61,6 +69,36 @@ class RawEpisode(BaseModel):
     source_description: str
     source: EpisodeType
     reference_time: datetime
+
+
+def save_checkpoint(data: list | dict, checkpoint_path: str) -> str:
+    if isinstance(data, dict):
+        serializable = {}
+        for k, v in data.items():
+            if isinstance(v, BaseModel):
+                serializable[k] = v.model_dump(mode="json")
+            else:
+                serializable[k] = v
+
+    elif isinstance(data, list):
+        serializable = []
+        for item in data:
+            if isinstance(item, BaseModel):
+                serializable.append(item.model_dump(mode="json"))
+            else:
+                serializable.append(item)
+    
+    Path(checkpoint_path).write_text(json.dumps(serializable))
+    return checkpoint_path
+
+def load_checkpoint(checkpoint_path: str, model:Type[T]) -> list | dict:
+    content = Path(checkpoint_path).read_text()
+    data = json.loads(content)
+    if isinstance(data, dict):
+        return {k: model(**v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [model(**item) for item in data]
+    return data
 
 
 async def retrieve_previous_episodes_bulk(
@@ -154,12 +192,21 @@ async def add_nodes_and_edges_bulk_tx(
 
         edge_data.update(edge.attributes or {})
         edges.append(edge_data)
-
+    for edge in episodic_edges:
+        assert edge is not None and edge != {}, "EpisodicEdge cannot be empty"
+        assert isinstance(edge, EpisodicEdge), "EpisodicEdge must be an instance of EpisodicEdge"
+        assert isinstance(edge.model_dump(mode="json")['source_node_uuid'], str) and edge.model_dump(mode="json")['source_node_uuid'] != "", "EpisodicEdge source_node_uuid must be a non-empty string"
+        assert isinstance(edge.model_dump(mode="json")['target_node_uuid'], str) and edge.model_dump(mode="json")['target_node_uuid'] != "", "EpisodicEdge target_node_uuid must be a non-empty string"
+        assert isinstance(edge.model_dump(mode="json")['uuid'], str) and edge.model_dump(mode="json")['uuid'] != "", "EpisodicEdge uuid must be a non-empty string"
+        assert isinstance(edge.model_dump(mode="json")['created_at'], str) and edge.model_dump(mode="json")['created_at'] != "", "EpisodicEdge created_at must be a non-empty string"
+        assert isinstance(edge.model_dump(mode="json")['group_id'], str), "EpisodicEdge group_id must be a non-empty string"
     await tx.run(get_episode_node_save_bulk_query(driver.provider), episodes=episodes)
+    with open('debug_edges.json', 'w', encoding='utf-8') as f:
+        json.dump([edge.model_dump(mode = "json") for edge in episodic_edges], f, ensure_ascii=False, indent=4)
     entity_node_save_bulk = get_entity_node_save_bulk_query(driver.provider, nodes)
     await tx.run(entity_node_save_bulk, nodes=nodes)
     await tx.run(
-        EPISODIC_EDGE_SAVE_BULK, episodic_edges=[edge.model_dump() for edge in episodic_edges]
+        EPISODIC_EDGE_SAVE_BULK, episodic_edges=[edge.model_dump(mode = "json") for edge in episodic_edges]
     )
     entity_edge_save_bulk = get_entity_edge_save_bulk_query(driver.provider)
     await tx.run(entity_edge_save_bulk, entity_edges=edges)
@@ -197,7 +244,6 @@ async def extract_nodes_and_edges_bulk(
 
     return extracted_nodes_bulk, extracted_edges_bulk
 
-
 async def dedupe_nodes_bulk(
     clients: GraphitiClients,
     extracted_nodes: list[list[EntityNode]],
@@ -206,44 +252,47 @@ async def dedupe_nodes_bulk(
 ) -> tuple[dict[str, list[EntityNode]], dict[str, str]]:
     embedder = clients.embedder
     min_score = 0.8
+    max_score = 0.97
 
-    # generate embeddings
+    # Generate embeddings
     await semaphore_gather(
         *[create_entity_node_embeddings(embedder, nodes) for nodes in extracted_nodes]
     )
 
-    # Find similar results
     dedupe_tuples: list[tuple[list[EntityNode], list[EntityNode]]] = []
+    exact_match_pairs: list[tuple[str, str]] = []  # ✅ NEW: collect exact matches here
+    
     for i, nodes_i in enumerate(extracted_nodes):
         existing_nodes: list[EntityNode] = []
         for j, nodes_j in enumerate(extracted_nodes):
             if i == j:
                 continue
             existing_nodes += nodes_j
-
+        seen_names: set[str] = set()
         candidates_i: list[EntityNode] = []
         for node in nodes_i:
             for existing_node in existing_nodes:
-                # Approximate BM25 by checking for word overlaps (this is faster than creating many in-memory indices)
-                # This approach will cast a wider net than BM25, which is ideal for this use case
-                node_words = set(node.name.lower().split())
-                existing_node_words = set(existing_node.name.lower().split())
-                has_overlap = not node_words.isdisjoint(existing_node_words)
-                if has_overlap:
-                    candidates_i.append(existing_node)
+                # ✅ Auto-merge identical names (skip LLM step)
+                if existing_node.name.strip().lower() in seen_names:
                     continue
-
-                # Check for semantic similarity even if there is no overlap
+                if node.name.strip().lower() == existing_node.name.strip().lower():
+                    exact_match_pairs.append((node.uuid, existing_node.uuid))
+                    continue
+                # ✅ Keep semantic similarity check
                 similarity = np.dot(
                     normalize_l2(node.name_embedding or []),
                     normalize_l2(existing_node.name_embedding or []),
                 )
-                if similarity >= min_score:
+                if similarity >= max_score:
+                    exact_match_pairs.append((node.uuid, existing_node.uuid))
+                    continue
+                elif similarity >= min_score:
                     candidates_i.append(existing_node)
+                    seen_names.add(existing_node.name.strip().lower())
 
         dedupe_tuples.append((nodes_i, candidates_i))
 
-    # Determine Node Resolutions
+    # Run resolve_extracted_nodes only on non-exact candidates
     bulk_node_resolutions: list[
         tuple[list[EntityNode], dict[str, str], list[tuple[EntityNode, EntityNode]]]
     ] = await semaphore_gather(
@@ -254,20 +303,24 @@ async def dedupe_nodes_bulk(
                 episode_tuples[i][0],
                 episode_tuples[i][1],
                 entity_types,
-                existing_nodes_override=dedupe_tuples[i][1],
+                existing_nodes_override=dedupe_tuple[1],
             )
             for i, dedupe_tuple in enumerate(dedupe_tuples)
+            if dedupe_tuple[1]  # ✅ Skip if no candidates left
         ]
     )
 
-    # Collect all duplicate pairs sorted by uuid
     duplicate_pairs: list[tuple[str, str]] = []
+
+    # ✅ Include auto-merged exact matches first
+    duplicate_pairs.extend(exact_match_pairs)
+
+    # ✅ Then include duplicates found by LLM
     for _, _, duplicates in bulk_node_resolutions:
         for duplicate in duplicates:
             n, m = duplicate
             duplicate_pairs.append((n.uuid, m.uuid))
 
-    # Now we compress the duplicate_map, so that 3 -> 2 and 2 -> becomes 3 -> 1 (sorted by uuid)
     compressed_map: dict[str, str] = compress_uuid_map(duplicate_pairs)
 
     node_uuid_map: dict[str, EntityNode] = {
@@ -277,12 +330,12 @@ async def dedupe_nodes_bulk(
     nodes_by_episode: dict[str, list[EntityNode]] = {}
     for i, nodes in enumerate(extracted_nodes):
         episode = episode_tuples[i][0]
-
         nodes_by_episode[episode.uuid] = [
             node_uuid_map[compressed_map.get(node.uuid, node.uuid)] for node in nodes
         ]
 
     return nodes_by_episode, compressed_map
+
 
 
 async def dedupe_edges_bulk(
@@ -295,6 +348,7 @@ async def dedupe_edges_bulk(
 ) -> dict[str, list[EntityEdge]]:
     embedder = clients.embedder
     min_score = 0.6
+    max_score = 0.95
 
     # generate embeddings
     await semaphore_gather(
@@ -302,6 +356,7 @@ async def dedupe_edges_bulk(
     )
 
     # Find similar results
+    exact_match_pairs: list[tuple[str, str]] = []  # ✅ NEW: collect exact matches here
     dedupe_tuples: list[tuple[EpisodicNode, EntityEdge, list[EntityEdge]]] = []
     for i, edges_i in enumerate(extracted_edges):
         existing_edges: list[EntityEdge] = []
@@ -309,7 +364,7 @@ async def dedupe_edges_bulk(
             if i == j:
                 continue
             existing_edges += edges_j
-
+        seen_edges = set()
         for edge in edges_i:
             candidates: list[EntityEdge] = []
             for existing_edge in existing_edges:
@@ -320,21 +375,30 @@ async def dedupe_edges_bulk(
                     or edge.target_node_uuid != existing_edge.target_node_uuid
                 ):
                     continue
-
-                edge_words = set(edge.fact.lower().split())
-                existing_edge_words = set(existing_edge.fact.lower().split())
-                has_overlap = not edge_words.isdisjoint(existing_edge_words)
-                if has_overlap:
-                    candidates.append(existing_edge)
+                if existing_edge.fact.strip().lower() in seen_edges:
                     continue
+                if edge.fact.strip().lower() == existing_edge.fact.strip().lower():
+                    exact_match_pairs.append((edge.uuid, existing_edge.uuid))
+                    continue
+                # edge_words = set(edge.fact.lower().split())
+                # existing_edge_words = set(existing_edge.fact.lower().split())
+                # has_overlap = not edge_words.isdisjoint(existing_edge_words)
+                # if has_overlap:
+                #     # candidates.append(existing_edge)
+                    
+                #     continue
+
 
                 # Check for semantic similarity even if there is no overlap
                 similarity = np.dot(
                     normalize_l2(edge.fact_embedding or []),
                     normalize_l2(existing_edge.fact_embedding or []),
                 )
+                if similarity >= max_score:
+                    exact_match_pairs.append((edge.uuid, existing_edge.uuid))
                 if similarity >= min_score:
                     candidates.append(existing_edge)
+                    seen_edges.add(existing_edge.fact.strip().lower())
 
             dedupe_tuples.append((episode_tuples[i][0], edge, candidates))
 
@@ -357,6 +421,7 @@ async def dedupe_edges_bulk(
 
     # For now we won't track edge invalidation
     duplicate_pairs: list[tuple[str, str]] = []
+    duplicate_pairs.extend(exact_match_pairs)
     for i, (_, _, duplicates) in enumerate(bulk_edge_resolutions):
         episode, edge, candidates = dedupe_tuples[i]
         for duplicate in duplicates:

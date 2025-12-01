@@ -17,6 +17,7 @@ limitations under the License.
 import logging
 from datetime import datetime
 from time import time
+from unittest.mock import Base
 
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -98,7 +99,8 @@ from graphiti_core.utils.maintenance.node_operations import (
     resolve_extracted_nodes,
 )
 from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entity_types
-
+from pathlib import Path
+import json
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -618,10 +620,21 @@ class Graphiti:
         If these operations are required, use the `add_episode` method instead for each
         individual episode.
         """
+        assert issubclass(EpisodicNode, BaseModel)
+        assert issubclass(EntityNode, BaseModel)
+        assert issubclass(EntityEdge, BaseModel)
+        assert issubclass(EpisodicEdge, BaseModel)
+        logger = logging.getLogger(__name__)
+        logger.info(f'Starting bulk add of {len(bulk_episodes)} episodes')
+
+        tmp_folder = Path('./.tmp')
+        tmp_folder.mkdir(parents=True, exist_ok=True)
+        from graphiti_core.utils.bulk_utils import save_checkpoint
+        import os
         try:
             start = time()
             now = utc_now()
-
+            
             # if group_id is None, use the default group id by the provider
             group_id = group_id or get_default_group_id(self.driver.provider)
             validate_group_id(group_id)
@@ -632,7 +645,7 @@ class Graphiti:
                 if edge_types is not None
                 else {('Entity', 'Entity'): []}
             )
-
+            
             episodes = [
                 await EpisodicNode.get_by_uuid(self.driver, episode.uuid)
                 if episode.uuid is not None
@@ -648,6 +661,7 @@ class Graphiti:
                 )
                 for episode in bulk_episodes
             ]
+            save_checkpoint(episodes, os.path.join(tmp_folder, 'existing_episodes.json'))
 
             episodes_by_uuid: dict[str, EpisodicNode] = {
                 episode.uuid: episode for episode in episodes
@@ -675,8 +689,6 @@ class Graphiti:
                 entity_types=entity_types,
                 excluded_entity_types=excluded_entity_types,
             )
-
-            # Dedupe extracted nodes in memory
             nodes_by_episode, uuid_map = await dedupe_nodes_bulk(
                 self.clients, extracted_nodes_bulk, episode_context, entity_types
             )
@@ -836,7 +848,23 @@ class Graphiti:
             # Resolved pointers for episodic edges
             resolved_episodic_edges = resolve_edge_pointers(episodic_edges, uuid_map)
 
-            # save data to KG
+            # save a temporary file in case add_node_and_edges bricks
+            
+            for node in final_hydrated_nodes:
+                if not isinstance(node.summary, str) or "{" in node.summary or "}" in node.summary:
+                    # LLM Hallucination can cause summary to be of dict type or BaseModel type
+                    try:    
+                        print(f'Correcting node summary: {node.summary}')
+                        node.summary = str(node.summary)
+                    except Exception as e:
+                        print(f'Failed to correct node summary: {node.summary}, error: {e}')
+            
+            save_checkpoint(episodes, os.path.join(tmp_folder, 'episodes.json'))
+            save_checkpoint(resolved_episodic_edges, os.path.join(tmp_folder, 'episodic_edges.json'))
+            save_checkpoint(final_hydrated_nodes, os.path.join(tmp_folder, 'nodes.json'))
+            save_checkpoint(resolved_edges, os.path.join(tmp_folder, 'resolved_edges.json'))
+            save_checkpoint(invalidated_edges, os.path.join(tmp_folder, 'invalidated_edges.json'))
+            # save data to KG   
             await add_nodes_and_edges_bulk(
                 self.driver,
                 episodes,
@@ -1005,7 +1033,7 @@ class Graphiti:
             await target_node.generate_name_embedding(self.embedder)
         if edge.fact_embedding is None:
             await edge.generate_embedding(self.embedder)
-
+        
         nodes, uuid_map, _ = await resolve_extracted_nodes(
             self.clients,
             [source_node, target_node],

@@ -390,16 +390,22 @@ async def resolve_extracted_edge(
         return extracted_edge, [], []
 
     start = time()
+    # Skip straight to duplicates for edges with exact matches
+    exact_match_edges = []
+    for related_edge in related_edges:
+        if related_edge.fact == extracted_edge.fact:
+            exact_match_edges.append(related_edge)
 
     # Prepare context for LLM
+    
     related_edges_context = [
-        {'id': edge.uuid, 'fact': edge.fact} for i, edge in enumerate(related_edges)
+        {'id': edge.uuid, 'fact': edge.fact} for i, edge in enumerate(related_edges) if edge not in exact_match_edges
     ]
 
     invalidation_edge_candidates_context = [
         {'id': i, 'fact': existing_edge.fact} for i, existing_edge in enumerate(existing_edges)
     ]
-
+    
     edge_types_context = (
         [
             {
@@ -426,6 +432,7 @@ async def resolve_extracted_edge(
         response_model=EdgeDuplicate,
         model_size=ModelSize.small,
     )
+    
     response_object = EdgeDuplicate(**llm_response)
     duplicate_facts = response_object.duplicate_facts
 

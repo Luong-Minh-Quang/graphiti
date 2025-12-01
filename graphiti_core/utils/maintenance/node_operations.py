@@ -39,7 +39,8 @@ from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.datetime_utils import utc_now
 from graphiti_core.utils.maintenance.edge_operations import filter_existing_duplicate_of_edges
-
+from graphiti_core.helpers import normalize_l2
+import numpy as np
 logger = logging.getLogger(__name__)
 
 
@@ -212,9 +213,9 @@ async def resolve_extracted_nodes(
     )
 
     existing_nodes_dict: dict[str, EntityNode] = {node.uuid: node for node in candidate_nodes}
-
+    
     existing_nodes: list[EntityNode] = list(existing_nodes_dict.values())
-
+            
     existing_nodes_context = (
         [
             {
@@ -244,7 +245,7 @@ async def resolve_extracted_nodes(
         }
         for i, node in enumerate(extracted_nodes)
     ]
-
+    
     context = {
         'extracted_nodes': extracted_nodes_context,
         'existing_nodes': existing_nodes_context,
@@ -254,17 +255,52 @@ async def resolve_extracted_nodes(
         else [],
         'ensure_ascii': clients.ensure_ascii,
     }
+    
+    
+    # LLM deduplication
+    # llm_response = await llm_client.generate_response(
+    #     prompt_library.dedupe_nodes.nodes(context),
+    #     response_model=NodeResolutions,
+    # )
 
-    llm_response = await llm_client.generate_response(
-        prompt_library.dedupe_nodes.nodes(context),
-        response_model=NodeResolutions,
-    )
+    # node_resolutions: list[NodeDuplicate] = NodeResolutions(**llm_response).entity_resolutions
 
-    node_resolutions: list[NodeDuplicate] = NodeResolutions(**llm_response).entity_resolutions
-
+    # Non-LLM deduplication
+    def resolve_node_pair(node: EntityNode, candidates: list[EntityNode], id: int) -> NodeDuplicate:
+        max_score = 0.95  # Threshold for considering a strong match
+        duplicates = []
+        seen_names = set()
+        for idx, candidate in enumerate(candidates):
+            if candidate.name.strip().lower() in seen_names:
+                continue
+            if node.name.strip().lower() == candidate.name.strip().lower():
+                duplicates.append(idx)
+            # ✅ Keep semantic similarity check
+            assert node.name_embedding is not None and candidate.name_embedding is not None, "Node embeddings must be precomputed."
+            similarity = np.dot(
+                normalize_l2(node.name_embedding or []),
+                normalize_l2(candidate.name_embedding or []),
+            )
+            if similarity >= max_score:
+                duplicates.append(idx)
+            seen_names.add(candidate.name.strip().lower())
+        return NodeDuplicate(
+            id=id,
+            duplicate_idx=duplicates[0] if len(duplicates) > 0 else -1,
+            name=node.name,
+            duplicates=duplicates,
+            )
+    node_resolutions = []
+    for i in range(len(extracted_nodes)):
+        node_resolutions.append(
+            resolve_node_pair(extracted_nodes[i], existing_nodes, i)
+        )
+    # END Non-LLM deduplication
+    
     resolved_nodes: list[EntityNode] = []
     uuid_map: dict[str, str] = {}
     node_duplicates: list[tuple[EntityNode, EntityNode]] = []
+
     for resolution in node_resolutions:
         resolution_id: int = resolution.id
         duplicate_idx: int = resolution.duplicate_idx
@@ -278,7 +314,7 @@ async def resolve_extracted_nodes(
         )
 
         # resolved_node.name = resolution.get('name')
-
+        
         resolved_nodes.append(resolved_node)
         uuid_map[extracted_node.uuid] = resolved_node.uuid
 

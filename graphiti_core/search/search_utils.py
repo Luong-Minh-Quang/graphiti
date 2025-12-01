@@ -754,13 +754,17 @@ async def episode_fulltext_search(
         else:
             return []
     else:
+        with_group_id = "AND e.group_id IN $group_ids" if group_ids is not None else ""
+
         query = (
             get_nodes_query(driver.provider, 'episode_content', '$query')
             + """
             YIELD node AS episode, score
             MATCH (e:Episodic)
             WHERE e.uuid = episode.uuid
-            AND e.group_id IN $group_ids
+            """ 
+            + with_group_id + 
+            """
             RETURN
             """
             + EPISODIC_NODE_RETURN

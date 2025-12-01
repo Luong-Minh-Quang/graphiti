@@ -22,10 +22,22 @@ from datetime import datetime, timezone
 from logging import INFO
 
 from dotenv import load_dotenv
+import neo4j
 
 from graphiti_core import Graphiti
+from graphiti_core.driver import neo4j_driver
+from graphiti_core.llm_client.client import LLMClient
+from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.nodes import EpisodeType
 from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
+
+from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+
+from graphiti_core.llm_client.config import LLMConfig
+
+from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+
+from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 
 #################################################
 # CONFIGURATION
@@ -41,18 +53,10 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 logger = logging.getLogger(__name__)
-
 load_dotenv()
 
 # Neo4j connection parameters
 # Make sure Neo4j Desktop is running with a local DBMS started
-neo4j_uri = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
-neo4j_user = os.environ.get('NEO4J_USER', 'neo4j')
-neo4j_password = os.environ.get('NEO4J_PASSWORD', 'password')
-
-if not neo4j_uri or not neo4j_user or not neo4j_password:
-    raise ValueError('NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD must be set')
-
 
 async def main():
     #################################################
@@ -64,8 +68,40 @@ async def main():
     #################################################
 
     # Initialize Graphiti with Neo4j connection
-    graphiti = Graphiti(neo4j_uri, neo4j_user, neo4j_password)
+    from graphiti_core.driver.neo4j_driver import Neo4jDriver
 
+    # Create a Neo4j driver with custom database name
+    driver = Neo4jDriver(
+        uri=os.environ.get('NEO4J_URI', 'neo4j://192.168.0.100:7687'),
+        user=os.environ.get('NEO4J_USER', 'neo4j'),
+        password=os.environ.get('NEO4J_PASSWORD', 'password'),
+    )
+    llm_config = LLMConfig(
+        model = "gpt-4.1-mini",
+        small_model="gpt-4o-mini",
+    )
+
+
+    # Pass the driver to Graphiti
+    graphiti = Graphiti(
+        graph_driver=driver,
+            llm_client=OpenAIGenericClient(config=llm_config),
+
+            embedder=OpenAIEmbedder(
+
+                config=OpenAIEmbedderConfig(
+
+                )
+
+            ),
+
+            cross_encoder=OpenAIRerankerClient(
+
+                config=llm_config
+
+            )
+        )
+    
     try:
         # Initialize the graph database with graphiti's indices. This only needs to be done once.
         await graphiti.build_indices_and_constraints()
@@ -126,6 +162,7 @@ async def main():
                 source=episode['type'],
                 source_description=episode['description'],
                 reference_time=datetime.now(timezone.utc),
+                
             )
             print(f'Added episode: Freakonomics Radio {i} ({episode["type"].value})')
 
@@ -141,7 +178,7 @@ async def main():
         # Perform a hybrid search combining semantic similarity and BM25 retrieval
         print("\nSearching for: 'Who was the California Attorney General?'")
         results = await graphiti.search('Who was the California Attorney General?')
-
+        
         # Print search results
         print('\nSearch Results:')
         for result in results:

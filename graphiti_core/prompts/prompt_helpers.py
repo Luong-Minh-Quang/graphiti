@@ -4,7 +4,7 @@ from typing import Any
 DO_NOT_ESCAPE_UNICODE = '\nDo not escape unicode characters.\n'
 
 
-def to_prompt_json(data: Any, ensure_ascii: bool = True, indent: int = 2) -> str:
+def to_prompt_json(data: Any, ensure_ascii: bool = False, indent: int = 2) -> str:
     """
     Serialize data to JSON for use in prompts.
 
