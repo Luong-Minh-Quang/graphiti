@@ -201,8 +201,7 @@ async def add_nodes_and_edges_bulk_tx(
         assert isinstance(edge.model_dump(mode="json")['created_at'], str) and edge.model_dump(mode="json")['created_at'] != "", "EpisodicEdge created_at must be a non-empty string"
         assert isinstance(edge.model_dump(mode="json")['group_id'], str), "EpisodicEdge group_id must be a non-empty string"
     await tx.run(get_episode_node_save_bulk_query(driver.provider), episodes=episodes)
-    with open('debug_edges.json', 'w', encoding='utf-8') as f:
-        json.dump([edge.model_dump(mode = "json") for edge in episodic_edges], f, ensure_ascii=False, indent=4)
+
     entity_node_save_bulk = get_entity_node_save_bulk_query(driver.provider, nodes)
     await tx.run(entity_node_save_bulk, nodes=nodes)
     await tx.run(
